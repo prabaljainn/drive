@@ -99,3 +99,9 @@ Before: both → same PVC (batch-s3-pvc, RWX). Now: both → same NFS path. Shar
 Verify it's actually shared after rollout:
 microk8s kubectl exec deploy/batch-workers -- sh -c 'echo hi > /mnt/s3/dl_storage/.shared'
 microk8s kubectl exec deploy/backend-batch -- sh -c 'cat /mnt/s3/dl_storage/.shared'   # prints "hi" = same dir
+
+
+
+
+
+
