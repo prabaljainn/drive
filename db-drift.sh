@@ -58,3 +58,18 @@ Skip 33-seed-world-id.sql (lives on spider, untouched) and never run 34 against 
 
 CREATE USER 'prabal'@'%' IDENTIFIED BY '<pw-from-secret>';
 GRANT ALL PRIVILEGES ON *.* TO 'prabal'@'%';
+
+
+
+
+
+Three layers, cheapest first:
+
+1. MariaDB's own I/O counters (from your debug pod, no node access needed) — cumulative, so sample twice and diff:
+
+sql_primary mariadb-world1 prabal <<<"SHOW GLOBAL STATUS WHERE Variable_name IN
+  ('Innodb_data_read','Innodb_data_written','Innodb_data_reads','Innodb_data_writes',
+   'Innodb_data_fsyncs','Innodb_os_log_written','Innodb_buffer_pool_pages_flushed');"
+sleep 60
+# repeat, subtract, /60 → bytes/s and ops/s the DB is pushing at the volume
+
