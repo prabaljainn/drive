@@ -1,0 +1,1 @@
+EVAL "local n=0 for _,p in ipairs({'TCP:*','WH:*','DM:*'}) do for _,k in ipairs(redis.call('KEYS',p)) do redis.call('DEL',k) n=n+1 end end return n" 0
