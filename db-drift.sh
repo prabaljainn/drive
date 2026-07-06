@@ -50,3 +50,11 @@ Skip 33-seed-world-id.sql (lives on spider, untouched) and never run 34 against 
 - Replicas caught up: kubectl exec -n $NS mariadb-world2-<replica> -c mariadb -- ... "SHOW SLAVE STATUS\G" → both threads Yes (schema replicates automatically since you loaded via the primary service).
 - SPIDER reads work again (wrappers point at service names, nothing to redo there): sql_primary mariadb-spider prabal <<<"SELECT COUNT(*) FROM IOT_RTK.analysis_all_data;" — must not error.
 - Bounce the world2/3 registers (kubectl rollout restart deploy -l ...world2/world3 per 42-/43-*-pipeline.yaml) — they were likely crashlooping against the wiped DBs — then confirm telemetry rows land.
+
+
+
+
+
+
+CREATE USER 'prabal'@'%' IDENTIFIED BY '<pw-from-secret>';
+GRANT ALL PRIVILEGES ON *.* TO 'prabal'@'%';
