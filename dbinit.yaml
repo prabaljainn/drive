@@ -1,0 +1,120 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mariadb-schema-init
+  namespace: default
+spec:
+  backoffLimit: 0
+  # Keep completed Job around for a day so operators can see "already initialized"
+  # exits in `kubectl get jobs`. Was 300s; we lost audit trail that way.
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      containers:
+      - name: mariadb-client
+        image: mariadb:10.5
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          set -euo pipefail
+
+          MYSQL_FLAGS=(-h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" --silent)
+          MYSQL="mysql ${MYSQL_FLAGS[@]}"
+
+          echo "Waiting for MariaDB to be ready…"
+          until mysqladmin ping -h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" --silent >/dev/null 2>&1; do
+            echo "  …MariaDB unavailable, retrying in 2s"
+            sleep 2
+          done
+          echo "MariaDB is up."
+
+          # ---------------------------------------------------------------
+          # Idempotency gate. IOT_RTK_MASTER.__schema_init_marker records a
+          # successful run. If it exists, this Job is a no-op — so repeat
+          # `kubectl apply -f init-job.yaml` CANNOT destroy prod data or
+          # re-duplicate seed rows (the incident on 2026-04-22).
+          # Bypass for disaster-recovery runs with FORCE_REINIT=1.
+          # ---------------------------------------------------------------
+          ALREADY_INITIALIZED=0
+          if mysql "${MYSQL_FLAGS[@]}" -N -B -e \
+              "SELECT 1 FROM information_schema.TABLES
+               WHERE TABLE_SCHEMA='IOT_RTK_MASTER' AND TABLE_NAME='__schema_init_marker' LIMIT 1" \
+              2>/dev/null | grep -q '^1$'; then
+            ALREADY_INITIALIZED=1
+          fi
+
+          if [[ "$ALREADY_INITIALIZED" == "1" && "${FORCE_REINIT:-0}" != "1" ]]; then
+            echo
+            echo "✔ Schema already initialized. Refusing to re-run (would duplicate seed data)."
+            echo "  Marker row:"
+            mysql "${MYSQL_FLAGS[@]}" -t -e \
+              "SELECT * FROM IOT_RTK_MASTER.__schema_init_marker ORDER BY applied_at DESC LIMIT 5"
+            echo
+            echo "  To force a full re-init (DESTRUCTIVE — drops every table):"
+            echo "     kubectl -n default set env job/mariadb-schema-init FORCE_REINIT=1"
+            echo "     # or add  - name: FORCE_REINIT\\n       value: \"1\"  to this Job"
+            exit 0
+          fi
+
+          if [[ "${FORCE_REINIT:-0}" == "1" ]]; then
+            echo "⚠ FORCE_REINIT=1 — running DDL+seed even though marker is present."
+          else
+            echo "First-time initialization — running DDL+seed."
+          fi
+
+          FILES=(
+            "00000001_create_schema.sql"
+            "00000002_ddl_iot_rtk_master.sql"
+            "00000004_ddl_procedure_iot_rtk.sql"
+            "00000005_ddl_iot_rtk.sql"
+            "00000006_ddl_iot_rtk_master_migrations.sql"
+            "00000007_seed_data_id_sequence.sql"
+            "00000008_seed_data.sql"
+            "00000009_create_super_admin.sql"
+            00000099_optimized_tables.sql
+          )
+
+          for FILE in "${FILES[@]}"; do
+            if [[ -f "/sql-scripts/$FILE" ]]; then
+              echo "Executing $FILE…"
+              mysql "${MYSQL_FLAGS[@]}" < "/sql-scripts/$FILE"
+            else
+              echo "⚠ $FILE not found in ConfigMap mount — skipping"
+            fi
+          done
+
+          # ---------------------------------------------------------------
+          # Claim the marker. Subsequent `kubectl apply` sees this and no-ops.
+          # ---------------------------------------------------------------
+          mysql "${MYSQL_FLAGS[@]}" -e "
+            USE IOT_RTK_MASTER;
+            CREATE TABLE IF NOT EXISTS __schema_init_marker (
+              id          INT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
+              applied_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              applied_by  VARCHAR(128) NOT NULL DEFAULT 'mariadb-schema-init',
+              note        VARCHAR(255) NULL
+            ) ENGINE=InnoDB;
+            INSERT INTO __schema_init_marker (note)
+            VALUES (CONCAT('files=', ${#FILES[@]}, ' force=', '${FORCE_REINIT:-0}'));
+          "
+
+          echo "✔ Initialization Complete."
+        env:
+        - name: DB_HOST
+          value: "mariadb-world2-primary.mariadb.svc.cluster.local"
+        - name: DB_USER
+          value: "prabal"
+        - name: DB_PASS
+          value: "prabalprabal"
+        # Set FORCE_REINIT=1 ONLY for disaster recovery on an empty DB.
+        # Leaving it unset (or 0) means re-applying this Job is a safe no-op.
+        - name: FORCE_REINIT
+          value: "0"
+        volumeMounts:
+        - name: init-scripts
+          mountPath: /sql-scripts
+      restartPolicy: OnFailure
+      volumes:
+      - name: init-scripts
+        configMap:
+          name: mariadb-init-scripts
